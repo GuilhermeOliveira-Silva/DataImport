@@ -1,7 +1,6 @@
 """
 api/app.py
 Parte 6 — API FastAPI para upload de planilhas Excel.
-Reutiliza o pipeline existente via processar_importacao().
 """
 
 import os
@@ -9,14 +8,10 @@ import shutil
 import tempfile
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from main import processar_importacao
-
-
-# =============================================================================
-# APLICAÇÃO
-# =============================================================================
 
 app = FastAPI(
     title="Data Import API",
@@ -24,66 +19,62 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+    ],
+    allow_methods=["POST", "GET"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition", "X-Avisos", "X-Avisos-Detalhes"],
+)
 
-# =============================================================================
-# ENDPOINT PRINCIPAL
-# =============================================================================
 
 @app.post("/upload")
 async def upload_planilha(
     arquivo: UploadFile = File(..., description="Arquivo Excel (.xlsx)"),
     tabela: str = Form(default="PACIENTES", description="Nome da tabela destino"),
+    id_clinica: str = Form(default="", description="ID da clínica (opcional)"),
 ):
-    """
-    Recebe um arquivo .xlsx, executa o pipeline completo e retorna:
-
-    - **Sucesso sem avisos**   → arquivo .txt com o SQL para download
-    - **Sucesso com avisos**   → arquivo .txt com o SQL + avisos no header
-    - **Erros de validação**   → JSON com lista de erros (sem SQL)
-    - **Erro inesperado**      → HTTP 500 com mensagem amigável
-    """
-
-    # ------------------------------------------------------------------
-    # 1. Validação básica do arquivo recebido
-    # ------------------------------------------------------------------
     if not arquivo.filename.endswith(".xlsx"):
-        raise HTTPException(
-            status_code=400,
-            detail="Formato inválido. Envie um arquivo .xlsx.",
-        )
+        raise HTTPException(status_code=400, detail="Formato inválido. Envie um arquivo .xlsx.")
 
-    # ------------------------------------------------------------------
-    # 2. Salva arquivo temporário em disco
-    # ------------------------------------------------------------------
     with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
         shutil.copyfileobj(arquivo.file, tmp)
         caminho_tmp = tmp.name
 
-    # ------------------------------------------------------------------
-    # 3. Executa o pipeline
-    # ------------------------------------------------------------------
     try:
-        resultado = processar_importacao(caminho_tmp, tabela)
+        resultado = processar_importacao(
+            caminho_arquivo=caminho_tmp,
+            tabela=tabela,
+            modo_interativo=False,
+            id_clinica_fixo=id_clinica.strip() or None,
+        )
     finally:
-        # Remove o arquivo temporário independente do resultado
         if os.path.exists(caminho_tmp):
             os.remove(caminho_tmp)
 
-    # ------------------------------------------------------------------
-    # 4. Erro inesperado durante o pipeline
-    # ------------------------------------------------------------------
+    # ID_CLINICA ausente → código 461 para o front perguntar
+    if resultado.mensagem_erro_inesperado and "ID_CLINICA" in resultado.mensagem_erro_inesperado:
+        return JSONResponse(
+            status_code=461,
+            content={
+                "codigo": "ID_CLINICA_AUSENTE",
+                "mensagem": "O arquivo não contém ID_CLINICA. Informe o valor para continuar.",
+            },
+        )
+
+    # Erro inesperado
     if resultado.mensagem_erro_inesperado:
         raise HTTPException(
             status_code=500,
-            detail=(
-                "Erro ao processar o arquivo. Verifique o formato ou tente novamente. "
-                f"Log salvo em: {resultado.pasta_execucao}"
-            ),
+            detail=f"Erro ao processar o arquivo. Verifique o formato ou tente novamente. Log salvo em: {resultado.pasta_execucao}",
         )
 
-    # ------------------------------------------------------------------
-    # 5. Erros de validação → retorna JSON com erros (sem SQL)
-    # ------------------------------------------------------------------
+    # Erros de validação
     if not resultado.sucesso:
         return JSONResponse(
             status_code=422,
@@ -96,13 +87,9 @@ async def upload_planilha(
             },
         )
 
-    # ------------------------------------------------------------------
-    # 6. Sucesso → retorna arquivo SQL para download
-    #    Avisos (se houver) vão como header customizado
-    # ------------------------------------------------------------------
+    # Sucesso → download do SQL
     headers = {}
     if resultado.avisos:
-        # Header com total de avisos — detalhes no avisos.txt da pasta
         headers["X-Avisos"] = str(len(resultado.avisos))
         headers["X-Avisos-Detalhes"] = f"Ver {resultado.pasta_execucao}/avisos.txt"
 
@@ -114,11 +101,6 @@ async def upload_planilha(
     )
 
 
-# =============================================================================
-# ENDPOINT DE SAÚDE
-# =============================================================================
-
 @app.get("/health")
 def health():
-    """Verifica se a API está no ar."""
     return {"status": "ok"}

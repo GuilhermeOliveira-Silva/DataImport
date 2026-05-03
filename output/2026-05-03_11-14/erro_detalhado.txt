@@ -1,0 +1,18 @@
+ERRO INESPERADO — Detalhes técnicos
+============================================================
+
+Tipo   : ValueError
+Mensagem: ERRO: Colunas obrigatórias ausentes ou completamente vazias: ['ID_CLINICA']
+Verifique o arquivo de origem e tente novamente.
+
+Stack trace:
+------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\guilh\OneDrive\Documentos\FACULDADE(IMPORTANTE)\Projetos pessoais\Repos\DataImport\main.py", line 102, in processar_importacao
+    df = processar_planilha(caminho_arquivo)
+  File "C:\Users\guilh\OneDrive\Documentos\FACULDADE(IMPORTANTE)\Projetos pessoais\Repos\DataImport\transformer\normalizer.py", line 445, in processar_planilha
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: ERRO: Colunas obrigatórias ausentes ou completamente vazias: ['ID_CLINICA']
+Verifique o arquivo de origem e tente novamente.

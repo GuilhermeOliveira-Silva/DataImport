@@ -1,4 +1,0 @@
-ERROS CRÍTICOS — Importação bloqueada
-============================================================
-
-NOMEPACIENTE contém números nas linhas: [1794]

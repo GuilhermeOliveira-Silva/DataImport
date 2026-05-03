@@ -14,10 +14,13 @@ from pathlib import Path
 
 TABELA_PADRAO  = "PACIENTES"
 NOME_ARQUIVO   = "inserts_pacientes.txt"
-TAMANHO_LOTE   = 500        # linhas por INSERT (ajuste conforme o banco)
+TAMANHO_LOTE   = 500
 
 COLUNAS_EXCLUIR   = {"ID"}
-COLUNAS_NUMERICAS = {"ID_CLINICA"}
+COLUNAS_NUMERICAS = {"ID_CLINICA", "STATUS"}
+
+# Strings que representam nulo e devem virar NULL no SQL
+_STRINGS_NULAS = {"", "nan", "none", "null", "na", "<na>", "n/a", "nd", "-", "nat"}
 
 
 # =============================================================================
@@ -27,22 +30,35 @@ COLUNAS_NUMERICAS = {"ID_CLINICA"}
 def _formatar_valor(valor, coluna: str) -> str:
     """
     Converte um valor Python para a representação SQL correta.
-
-    Regras:
-        - NULL/NaN/vazio  → NULL
-        - Coluna numérica → sem aspas
-        - Texto           → 'valor' com aspas simples escapadas (' → '')
     """
-    if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+    # 1. None puro
+    if valor is None:
         return "NULL"
+
+    # 2. float NaN
+    if isinstance(valor, float) and pd.isna(valor):
+        return "NULL"
+
+    # 3. pd.NA, pd.NaT e outros escalares pandas
+    try:
+        if pd.isna(valor):
+            return "NULL"
+    except (TypeError, ValueError):
+        pass
+
+    # 4 e 5. Strings residuais
     valor_str = str(valor).strip()
-    if valor_str == "" or valor_str.upper() == "NAN":
+    if valor_str.lower() in _STRINGS_NULAS:
         return "NULL"
 
+    # Numérico — sem aspas
     if coluna in COLUNAS_NUMERICAS:
-        return valor_str if valor_str.lstrip("-").replace(".", "", 1).isdigit() \
-               else "'" + valor_str.replace("'", "''") + "'"
+        if valor_str.lstrip("-").replace(".", "", 1).isdigit():
+            return valor_str
+        # Não é número mesmo sendo coluna numérica → trata como texto
+        return "'" + valor_str.replace("'", "''") + "'"
 
+    # Texto — aspas simples escapadas
     return "'" + valor_str.replace("'", "''") + "'"
 
 
@@ -58,6 +74,7 @@ def _linha_para_valores(row: pd.Series, colunas: list[str]) -> str:
 def gerar_sql(df: pd.DataFrame, tabela: str = TABELA_PADRAO) -> str:
     """
     Gera todos os INSERTs em lote como uma única string SQL.
+    Cada lote de TAMANHO_LOTE linhas vira um INSERT INTO ... VALUES (...),(...),...;
 
     Args:
         df:     DataFrame validado e normalizado.
