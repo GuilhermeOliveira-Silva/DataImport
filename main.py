@@ -8,7 +8,6 @@ import sys
 import argparse
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pandas as pd
 
@@ -18,7 +17,12 @@ from validator.validator import validar
 from generator.sql_generator import gerar_e_salvar
 from utils.logger import registrar_resultado, salvar_erro_inesperado
 from utils.path_manager import criar_pasta_execucao
+from configs.loader import carregar_config
 
+
+# =============================================================================
+# RESULTADO DO PIPELINE
+# =============================================================================
 
 @dataclass
 class ResultadoPipeline:
@@ -32,12 +36,13 @@ class ResultadoPipeline:
 
 
 # =============================================================================
-# INTERAÇÃO CLI — ID_CLINICA ausente
+# INTERAÇÃO CLI — coluna obrigatória ausente
 # =============================================================================
 
-def solicitar_id_clinica_interativo(df: pd.DataFrame) -> pd.DataFrame | None:
+def solicitar_coluna_interativo(df: pd.DataFrame, coluna: str) -> pd.DataFrame | None:
+    """Pergunta ao usuário um valor fixo para preencher uma coluna vazia."""
     print("\n" + "=" * 60)
-    print("⚠️  ID_CLINICA não foi informado no arquivo.")
+    print(f"⚠️  {coluna} não foi informado no arquivo.")
     print("=" * 60)
     print("Deseja:")
     print("  1 - Informar um valor para todos os registros")
@@ -50,12 +55,12 @@ def solicitar_id_clinica_interativo(df: pd.DataFrame) -> pd.DataFrame | None:
             return None
         if escolha == "1":
             while True:
-                valor = input("Digite o ID_CLINICA: ").strip()
-                if valor.isdigit():
-                    df["ID_CLINICA"] = valor
-                    print(f"✅ ID_CLINICA = {valor} aplicado em todas as {len(df)} linhas.")
+                valor = input(f"Digite o valor para {coluna}: ").strip()
+                if valor:
+                    df[coluna] = valor
+                    print(f"✅ {coluna} = {valor} aplicado em todas as {len(df)} linhas.")
                     return df
-                print("❌ ID_CLINICA deve ser numérico. Tente novamente.")
+                print("❌ Valor não pode ser vazio. Tente novamente.")
         print("❌ Opção inválida. Digite 1 ou 2.")
 
 
@@ -67,29 +72,38 @@ def processar_importacao(
     caminho_arquivo: str,
     tabela: str = "PACIENTES",
     modo_interativo: bool = False,
-    id_clinica_fixo: str | None = None,   # ← API passa o valor direto aqui
+    id_clinica_fixo: str | None = None,
 ) -> ResultadoPipeline:
-    """
-    Args:
-        caminho_arquivo:  Caminho do .xlsx
-        tabela:           Nome da tabela destino
-        modo_interativo:  True = CLI (usa input()) | False = API
-        id_clinica_fixo:  Valor fixo de ID_CLINICA enviado pelo front/API
-    """
     pasta = criar_pasta_execucao()
 
+    # Carrega config da tabela
+    config_nome = tabela.lower()
+    try:
+        config = carregar_config(config_nome)
+    except ValueError:
+        config = carregar_config("pacientes")
+
+    # ------------------------------------------------------------------
+    # PARTE 1 — Leitura e mapeamento
+    # ------------------------------------------------------------------
     print("\n" + "=" * 60)
     print("PARTE 1 — Leitura e mapeamento de colunas")
     print("=" * 60)
 
     try:
-        df = processar_planilha(caminho_arquivo)
+        df = processar_planilha(caminho_arquivo, config=config)
 
     except ValueError as erro_planilha:
         mensagem = str(erro_planilha)
 
-        if "ID_CLINICA" not in mensagem:
-            # Outro erro de validação
+        # Tenta identificar qual coluna obrigatória está faltando
+        col_faltando = None
+        for col in config.COLUNAS_OBRIGATORIAS:
+            if col in mensagem:
+                col_faltando = col
+                break
+
+        if col_faltando is None:
             salvar_erro_inesperado(erro_planilha, pasta=str(pasta))
             return ResultadoPipeline(
                 sucesso=False,
@@ -97,26 +111,32 @@ def processar_importacao(
                 mensagem_erro_inesperado=mensagem,
             )
 
-        # ID_CLINICA ausente — reprocessa sem validar essa coluna
-        df = processar_planilha(caminho_arquivo, ignorar_obrigatorias=["ID_CLINICA"])
+        # Reprocessa ignorando a coluna faltante
+        df = processar_planilha(
+            caminho_arquivo,
+            config=config,
+            ignorar_obrigatorias=[col_faltando],
+        )
 
-        if id_clinica_fixo:
-            # API: valor veio do front
+        # ID_CLINICA tem tratamento especial via API
+        if col_faltando == "ID_CLINICA" and id_clinica_fixo:
             df["ID_CLINICA"] = id_clinica_fixo
             print(f"✅ ID_CLINICA = {id_clinica_fixo} aplicado via API.")
-
-        elif modo_interativo:
-            # CLI: pergunta ao usuário
-            df = solicitar_id_clinica_interativo(df)
-            if df is None:
-                return ResultadoPipeline(sucesso=False, pasta_execucao=str(pasta))
-
-        else:
-            # API sem valor → devolve erro especial para o front perguntar
+        elif col_faltando == "ID_CLINICA" and not modo_interativo:
             return ResultadoPipeline(
                 sucesso=False,
                 pasta_execucao=str(pasta),
-                mensagem_erro_inesperado=mensagem,  # contém "ID_CLINICA" → app.py detecta
+                mensagem_erro_inesperado=mensagem,
+            )
+        elif modo_interativo:
+            df = solicitar_coluna_interativo(df, col_faltando)
+            if df is None:
+                return ResultadoPipeline(sucesso=False, pasta_execucao=str(pasta))
+        else:
+            return ResultadoPipeline(
+                sucesso=False,
+                pasta_execucao=str(pasta),
+                mensagem_erro_inesperado=mensagem,
             )
 
     except Exception as erro:
@@ -128,6 +148,9 @@ def processar_importacao(
             mensagem_erro_inesperado=str(erro),
         )
 
+    # ------------------------------------------------------------------
+    # PARTES 2, 3 e 4
+    # ------------------------------------------------------------------
     try:
         # PARTE 2a — Normalização
         print("\n" + "=" * 60)
@@ -140,7 +163,7 @@ def processar_importacao(
         print("\n" + "=" * 60)
         print("PARTE 2b — Validação das regras de negócio")
         print("=" * 60)
-        resultado_validacao = validar(df)
+        resultado_validacao = validar(df, config=config)
 
         # PARTE 4 — Log e relatório
         registrar_resultado(
@@ -186,7 +209,7 @@ def processar_importacao(
 
 
 # =============================================================================
-# PARTE 5.1 — CLI
+# CLI
 # =============================================================================
 
 def obter_argumentos() -> argparse.Namespace:
@@ -197,7 +220,7 @@ def obter_argumentos() -> argparse.Namespace:
         epilog=(
             "Exemplos de uso:\n"
             "  python main.py --arquivo pacientes.xlsx\n"
-            "  python main.py --arquivo data/clientes.xlsx --tabela PACIENTES\n"
+            "  python main.py --arquivo agendamentos.xlsx --tabela AGENDAMENTOS\n"
         ),
     )
     parser.add_argument("--arquivo", required=True, metavar="CAMINHO",
